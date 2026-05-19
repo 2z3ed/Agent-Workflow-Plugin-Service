@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
 from app import database
-from app.config import settings
+from app.config import settings, warn_missing_dify_config
 from app.logger import setup_logger
 from app.models import TaskCreateRequest, TaskResponse
 from app.services.feishu_client import FeishuClient, get_long_conn_client, set_message_handler
@@ -24,6 +24,7 @@ DEFAULT_ALERT_MESSAGE_TEMPLATE = "【插件报警】\n插件: {plugin_name}\n规
 
 @app.on_event("startup")
 def startup_event():
+    warn_missing_dify_config()
     database.init_db()
     if settings.feishu_enable_long_conn:
         set_message_handler(handle_feishu_message)

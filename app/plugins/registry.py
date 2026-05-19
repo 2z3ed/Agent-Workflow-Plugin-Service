@@ -1,10 +1,16 @@
+from .ad.plugin import AdOptimizerPlugin
 from .email.plugin import EmailPlugin
 from .hello.plugin import HelloPlugin
+from .listing.plugin import ListingOptimizerPlugin
+from .product.plugin import ProductPlugin
 from .timestamp.plugin import TimestampPlugin
 
 PLUGINS = {
+    "ad": AdOptimizerPlugin(),
     "email": EmailPlugin(),
     "hello": HelloPlugin(),
+    "listing": ListingOptimizerPlugin(),
+    "product": ProductPlugin(),
     "timestamp": TimestampPlugin(),
 }
 

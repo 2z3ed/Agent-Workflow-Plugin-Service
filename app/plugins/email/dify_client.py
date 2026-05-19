@@ -1,11 +1,8 @@
 import json
 import logging
-import os
 from typing import Any
 
 import requests
-
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,18 +16,13 @@ REQUIRED_OUTPUT_FIELDS = (
 
 
 class DifyClient:
-    def __init__(self, api_url: str | None = None, api_key: str | None = None) -> None:
-        self.api_url = api_url or settings.dify_api_url or os.getenv("DIFY_API_URL", "")
-        self.api_key = api_key or settings.dify_api_key or os.getenv("DIFY_API_KEY", "")
+    def __init__(self, api_url: str, api_key: str) -> None:
+        if not api_url or not api_key:
+            raise ValueError("DifyClient requires non-empty api_url and api_key")
+        self.api_url = api_url
+        self.api_key = api_key
 
     def analyze(self, text: str) -> dict[str, Any]:
-        if not self.api_url or not self.api_key:
-            return {
-                "mode": "mock",
-                "summary": "Dify is not configured. Returning mock analysis.",
-                "input_preview": text[:200],
-            }
-
         # Dify workflow input limit (email_text < 9999 chars)
         email_text = text[:9900] if len(text) > 9900 else text
         payload = {

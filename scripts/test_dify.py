@@ -12,15 +12,15 @@ from app.plugins.email.dify_client import DifyClient, REQUIRED_OUTPUT_FIELDS
 
 
 def main():
-    if not settings.dify_api_url or not settings.dify_api_key:
-        print("❌ 未配置 DIFY_API_URL 或 DIFY_API_KEY，请在 .env 中设置")
+    if not settings.email_dify_api_url or not settings.email_dify_api_key:
+        print("❌ 未配置 EMAIL_DIFY_API_URL 或 EMAIL_DIFY_API_KEY，请在 .env 中设置")
         return 1
 
-    api_url = settings.dify_api_url
+    api_url = settings.email_dify_api_url
     print(f"📡 请求 URL: {api_url}")
-    print(f"🔑 API Key: {settings.dify_api_key[:8]}...{settings.dify_api_key[-4:]}")
+    print(f"🔑 API Key: {settings.email_dify_api_key[:8]}...{settings.email_dify_api_key[-4:]}")
 
-    client = DifyClient(api_url=api_url, api_key=settings.dify_api_key)
+    client = DifyClient(api_url=settings.email_dify_api_url, api_key=settings.email_dify_api_key)
     assert client.api_url == api_url, "DifyClient 未使用 settings 中的 URL"
 
     test_email_text = """发件人: 张三 <zhangsan@example.com>
@@ -34,7 +34,7 @@ def main():
         print(f"❌ 调用失败: {exc}")
         err = str(exc)
         if "401" in err or "unauthorized" in err.lower():
-            print("ℹ️  请检查 DIFY_API_KEY 是否为该工作流的 API Key")
+            print("ℹ️  请检查 EMAIL_DIFY_API_KEY 是否为邮件工作流的 API Key")
         elif "Connection" in err or "localhost" in api_url:
             print("ℹ️  请确认自托管 Dify 服务已启动且 URL 可访问")
         return 1

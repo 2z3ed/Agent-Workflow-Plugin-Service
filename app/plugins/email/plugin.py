@@ -38,8 +38,15 @@ class EmailPlugin(Plugin):
 """
 
     def __init__(self) -> None:
+        if not settings.email_dify_api_url or not settings.email_dify_api_key:
+            raise ValueError(
+                "EMAIL_DIFY_API_URL and EMAIL_DIFY_API_KEY must be set for email plugin"
+            )
         self.fetcher = EmailFetcher()
-        self.dify_client = DifyClient()
+        self.dify_client = DifyClient(
+            settings.email_dify_api_url,
+            settings.email_dify_api_key,
+        )
         repository.init_email_db()
 
     def execute(self, task_id: str, **params) -> dict:

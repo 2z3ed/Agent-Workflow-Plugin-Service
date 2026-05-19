@@ -1,8 +1,11 @@
+import logging
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -12,8 +15,12 @@ class Settings:
     port: int = int(os.getenv("APP_PORT", "8000"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     mailboxes: str = os.getenv("MAILBOXES", "")
-    dify_api_url: str = os.getenv("DIFY_API_URL", "")
-    dify_api_key: str = os.getenv("DIFY_API_KEY", "")
+    email_dify_api_url: str = os.getenv("EMAIL_DIFY_API_URL", "")
+    email_dify_api_key: str = os.getenv("EMAIL_DIFY_API_KEY", "")
+    product_dify_api_url: str = os.getenv("PRODUCT_DIFY_API_URL", "")
+    product_dify_api_key: str = os.getenv("PRODUCT_DIFY_API_KEY", "")
+    listing_dify_api_url: str = os.getenv("LISTING_DIFY_API_URL", "")
+    listing_dify_api_key: str = os.getenv("LISTING_DIFY_API_KEY", "")
     database_path: str = os.getenv("DATABASE_PATH", "./data/tasks.db")
     max_emails_per_box: int = int(os.getenv("MAX_EMAILS_PER_BOX", "20"))
     lookback_days: int = int(os.getenv("LOOKBACK_DAYS", "1"))
@@ -30,3 +37,18 @@ class Settings:
 
 
 settings = Settings()
+
+
+def warn_missing_dify_config() -> None:
+    if not settings.email_dify_api_url or not settings.email_dify_api_key:
+        logger.warning(
+            "EMAIL_DIFY_API_URL and EMAIL_DIFY_API_KEY are required for the email plugin"
+        )
+    if not settings.product_dify_api_url or not settings.product_dify_api_key:
+        logger.warning(
+            "PRODUCT_DIFY_API_URL and PRODUCT_DIFY_API_KEY are required for the product plugin"
+        )
+    if not settings.listing_dify_api_url or not settings.listing_dify_api_key:
+        logger.warning(
+            "LISTING_DIFY_API_URL and LISTING_DIFY_API_KEY are required for the listing plugin"
+        )
