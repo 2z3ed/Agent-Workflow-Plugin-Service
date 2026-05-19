@@ -44,8 +44,11 @@ curl -X POST http://localhost:8000/api/v1/timestamp/tasks \
 复制 `.env.example` 为 `.env` 后配置：
 
 - `MAILBOXES`：邮箱配置，格式为 `email:password:imap_server;email2:password2:imap_server2`
-- `DIFY_API_URL`：Dify 工作流接口地址
-- `DIFY_API_KEY`：Dify API Key
+- `DIFY_API_URL`：Dify 工作流接口地址（邮件插件，亦可用 `EMAIL_DIFY_API_URL`）
+- `DIFY_API_KEY`：Dify API Key（邮件插件，亦可用 `EMAIL_DIFY_API_KEY`）
+- `EMAIL_DIFY_API_URL` / `EMAIL_DIFY_API_KEY`：邮件分析工作流（推荐显式配置）
+- `PRODUCT_DIFY_API_URL` / `PRODUCT_DIFY_API_KEY`：选品分析工作流 `product_analyzer`
+- `LISTING_DIFY_API_URL` / `LISTING_DIFY_API_KEY`：Listing 优化工作流 `listing_optimizer`（可复用同一 Dify 实例，使用独立 API Key）
 - `DATABASE_PATH`：SQLite 数据库路径，默认 `./data/tasks.db`
 - `MAX_EMAILS_PER_BOX`：每个邮箱最多读取邮件数，默认 `20`
 - `LOOKBACK_DAYS`：回溯天数，默认 `1`
@@ -597,3 +600,135 @@ python scripts/test_alert_history.py
 ## 说明
 
 当前版本实现了插件市场展示、插件运行指标、任务查询、分页、排序、过滤和时间范围筛选，且所有能力保持向后兼容。
+
+## 项目架构（插件总览）
+
+本服务通过 **插件注册表**（`app/plugins/registry.py`）加载业务能力，统一由任务 API 或飞书长连接触发。当前已注册插件如下：
+
+| 插件名 | 说明 | 触发方式 | 主要依赖 |
+|--------|------|----------|----------|
+| `email` | 邮件分析：IMAP 读取、Dify 分析、汇总报告 | 飞书：`分析邮件` / `邮件报告` / `跑邮件`；API：`POST /api/v1/email/tasks` | IMAP 邮箱、`EMAIL_DIFY_*`、飞书 |
+| `hello` | 框架示例插件 | API：`POST /api/v1/hello/tasks` | 无 |
+| `timestamp` | 返回服务器时间戳 | API：`POST /api/v1/timestamp/tasks` | 无 |
+| `product` | 选品分析：按关键词生成模拟选品报告 | 飞书：`选品分析 <关键词>`；API：`POST /api/v1/product/tasks` | `PRODUCT_DIFY_*`、飞书 |
+| `listing` | Listing 优化：标题、五点、关键词、A+ 等建议 | 飞书：`Listing 优化 <文本>`；API：`POST /api/v1/listing/tasks` | `LISTING_DIFY_*`、飞书 |
+| `ad` | 广告监控：模拟广告数据 + 规则优化建议 | 飞书：`广告报告` / `广告优化`；API：`POST /api/v1/ad/tasks` | 无（内置模拟数据） |
+
+飞书指令由 `app/services/feishu_commands.py` 解析，创建任务后同步执行插件，并将 `result.report` 推送到群聊。
+
+## 选品分析插件（Product Plugin）
+
+根据用户输入的关键词，调用 Dify 工作流 `product_analyzer` 生成模拟选品报告（评分、总结、建议）。未配置 Dify 或调用失败时可回退 mock 数据。
+
+### 飞书指令
+
+在群内 @机器人 发送：
+
+```text
+选品分析 无线耳机
+```
+
+机器人会先回复「正在分析中...」，完成后将纯文本报告发送到群聊。
+
+### 配置要求
+
+在 `.env` 中配置（参见 `.env.example`）：
+
+```bash
+PRODUCT_DIFY_API_URL=http://your-dify-host/v1/workflows/run
+PRODUCT_DIFY_API_KEY=app-product-workflow-key
+```
+
+另需配置飞书长连接：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`。
+
+### API 调用示例
+
+```bash
+curl -X POST http://localhost:8000/api/v1/product/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"keyword": "无线耳机", "chat_id": "oc_xxxxx"}'
+```
+
+### 本地测试
+
+```bash
+python scripts/test_product_plugin.py
+```
+
+## Listing 优化插件（Listing Plugin）
+
+针对商品关键词或现有 Listing 文本，调用 Dify 工作流 `listing_optimizer`，生成亚马逊 Listing 优化建议（标题、五点、后台关键词、A+ 建议、评分与差异化等）。
+
+### 飞书指令
+
+```text
+Listing 优化 无线耳机
+```
+
+机器人会先回复「正在分析 Listing...」，完成后发送分段清晰的纯文本报告。
+
+### 配置要求
+
+Listing 插件使用**独立**环境变量（无全局 Dify 回退），可与选品插件共用同一 Dify 部署实例，但需单独发布工作流并获取 API Key：
+
+```bash
+LISTING_DIFY_API_URL=http://your-dify-host/v1/workflows/run
+LISTING_DIFY_API_KEY=app-listing-workflow-key
+```
+
+工作流输入变量：`product_input`。
+
+### API 调用示例
+
+```bash
+curl -X POST http://localhost:8000/api/v1/listing/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"product_input": "无线耳机", "chat_id": "oc_xxxxx"}'
+```
+
+### 本地测试
+
+```bash
+python scripts/test_listing_plugin.py
+```
+
+## 广告监控插件（Ad Plugin）
+
+基于内置模拟数据生成近 7 天广告活动整体指标与关键词明细，通过规则引擎输出优化建议（如 ACOS 过高降价、无转化加否定词、CTR 偏低优化创意等）。**不调用 Dify**，不依赖外部广告 API。
+
+### 飞书指令
+
+```text
+广告报告
+```
+
+或：
+
+```text
+广告优化
+```
+
+机器人会先回复「正在获取广告数据...」，随后发送包含整体指标与关键词建议的纯文本报告。
+
+### 配置要求
+
+无需额外 Dify 或广告 API 配置；仅需飞书长连接（`FEISHU_APP_ID`、`FEISHU_APP_SECRET`）即可通过群指令触发。
+
+数据来源为插件内置模拟数据，后续可对接真实 SP-API 或报表导入。
+
+### API 调用示例
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ad/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "oc_xxxxx"}'
+```
+
+### 规则说明（摘要）
+
+| 条件 | 建议 |
+|------|------|
+| ACOS > 30% | 降低出价或暂停 |
+| CTR < 1% | 优化创意或调整匹配方式 |
+| ACOS < 20% 且转化良好 | 提高出价 |
+| 无转化 | 添加为否定关键词 |
