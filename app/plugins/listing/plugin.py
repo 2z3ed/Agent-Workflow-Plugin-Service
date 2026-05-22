@@ -7,10 +7,16 @@ import requests
 
 from app.config import settings
 from app.plugins.base import Plugin
-from app.plugins.common.sorftime_collector import SorftimeCollector, looks_like_asin
+from app.plugins.common.sorftime_collector import SorftimeCollector
 from app.plugins.email.dify_client import DifyClient
 
 logger = logging.getLogger(__name__)
+
+# ASIN：10 位大写字母数字，或 B 开头 + 9 位（亚马逊常见格式）
+_ASIN_PATTERNS = (
+    re.compile(r"^[A-Z0-9]{10}$"),
+    re.compile(r"^B[0-9A-Z]{9}$"),
+)
 
 LISTING_JSON_FIELDS = (
     "title_optimized",
@@ -60,8 +66,9 @@ class ListingDifyClient(DifyClient):
             return {"mode": "dify", "_raw": raw}
 
         analysis, report = _parse_listing_outputs(outputs)
+        report = _clean_dify_report(report)
         logger.info(
-            "Dify response received: output_keys=%s analysis_keys=%s report_len=%s",
+            "Dify listing workflow done output_keys=%s analysis_keys=%s report_len=%s",
             list(outputs.keys()),
             list(analysis.keys()),
             len(report),
@@ -221,30 +228,132 @@ def _format_report_from_analysis(analysis: dict[str, Any], product_input: str) -
     return "\n".join(lines).strip()
 
 
-def _build_dify_product_input(product_input: str, market_data: dict[str, Any] | None) -> str:
+def _detect_input_type(user_input: str) -> str:
+    """返回 'asin' 或 'keyword'。"""
+    candidate = (user_input or "").strip().upper()
+    for pattern in _ASIN_PATTERNS:
+        if pattern.match(candidate):
+            return "asin"
+    return "keyword"
+
+
+def _clean_dify_report(text: str) -> str:
+    """移除 Dify LLM 思考块，保留可发飞书的正文。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    parts = re.split(r"</think>", cleaned, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) > 1:
+        cleaned = parts[1]
+    return cleaned.strip()
+
+
+def _is_valid_sorftime_data(data: dict[str, Any] | None) -> bool:
+    if not data:
+        return False
+    if data.get("raw_text") in ("没有相关数据", "无数据", ""):
+        return False
+    if len(data) == 1 and "raw_text" in data:
+        return False
+    return True
+
+
+def _build_dify_product_input(
+    user_input: str,
+    market_data: dict[str, Any] | None,
+    input_type: str,
+) -> str:
     if not market_data:
-        return product_input
-    data_json = json.dumps(market_data, ensure_ascii=False)
+        return user_input
+    data_json = json.dumps(market_data, ensure_ascii=False, indent=2)
     if len(data_json) > 8000:
         data_json = data_json[:8000] + "…"
+    data_label = "ASIN 竞品 Listing 数据" if input_type == "asin" else "品类关键词市场数据"
     return (
-        f"用户输入：{product_input}\n\n"
-        f"以下为 Sorftime 真实竞品/Listing 数据（JSON），请结合数据生成 Listing 优化报告：\n"
-        f"{data_json}"
+        f"用户要求优化以下产品：{user_input}\n\n"
+        f"【真实市场数据（来自 Sorftime · {data_label}）】\n"
+        f"{data_json}\n\n"
+        f"请基于以上真实数据，生成 Listing 优化报告（包括标题、五点、后台关键词、描述结构、A+ 建议、评分与差异化建议等）。"
     )
 
 
-def _fetch_sorftime_listing_data(product_input: str) -> dict[str, Any] | None:
-    if not settings.sorftime_api_key:
-        return None
+def _fetch_sorftime_listing_data(
+    user_input: str,
+) -> tuple[dict[str, Any] | None, str, str]:
+    """
+    按输入类型调用 Sorftime。
+    返回 (market_data, input_type, sorftime_method)。
+    """
+    input_type = _detect_input_type(user_input)
+    api_key = settings.sorftime_api_key or ""
+    if not api_key:
+        logger.info(
+            "Listing Sorftime API key not configured, skip (input_type=%s)",
+            input_type,
+        )
+        return None, input_type, ""
+
     collector = SorftimeCollector()
-    try:
-        if looks_like_asin(product_input):
-            return collector.listing_analysis(product_input.strip().upper(), site="com")
-        return collector.product_research(product_input, site="com")
-    except Exception as exc:
-        logger.warning("Sorftime listing data fetch failed for %r: %s", product_input, exc)
-        return None
+    if input_type == "asin":
+        asin = user_input.strip().upper()
+        method = "listing_analysis"
+        logger.info(
+            "Listing input detected as ASIN=%s, calling Sorftime listing_analysis site=com api_key_prefix=%s",
+            asin,
+            api_key[:8] + "...",
+        )
+        try:
+            data = collector.listing_analysis(asin, site="com")
+        except Exception as exc:
+            logger.warning("Sorftime listing_analysis failed for %r: %s", asin, exc)
+            return None, input_type, method
+    else:
+        method = "product_research"
+        logger.info(
+            "Listing input detected as keyword=%r, calling Sorftime product_research site=com api_key_prefix=%s",
+            user_input,
+            api_key[:8] + "...",
+        )
+        try:
+            data = collector.product_research(user_input, site="com")
+        except Exception as exc:
+            logger.warning("Sorftime product_research failed for %r: %s", user_input, exc)
+            return None, input_type, method
+
+    if not _is_valid_sorftime_data(data):
+        preview = json.dumps(data, ensure_ascii=False)[:200] if data else "None"
+        logger.warning(
+            "Sorftime %s returned no usable data for %r: %s",
+            method,
+            user_input,
+            preview,
+        )
+        return None, input_type, method
+
+    logger.info(
+        "Sorftime %s success for %r keys=%s preview=%s",
+        method,
+        user_input,
+        list(data.keys())[:8],
+        json.dumps(data, ensure_ascii=False)[:200],
+    )
+    return data, input_type, method
+
+
+def _sorftime_fallback_report(
+    user_input: str,
+    market_data: dict[str, Any],
+    input_type: str,
+) -> str:
+    label = "ASIN 竞品数据" if input_type == "asin" else "品类市场数据"
+    lines = [
+        f"📦 Listing 优化报告（基于 Sorftime 真实{label}）",
+        f"输入：{user_input}",
+        "",
+    ]
+    preview = json.dumps(market_data, ensure_ascii=False, indent=2)[:2000]
+    lines.append(preview)
+    return "\n".join(lines)
 
 
 def _mock_result(product_input: str, reason: str = "") -> dict[str, Any]:
@@ -306,32 +415,67 @@ class ListingOptimizerPlugin(Plugin):
             raise ValueError("product_input is required")
 
         chat_id = params.get("chat_id")
+        input_type = _detect_input_type(product_input)
+        api_key_prefix = (
+            (settings.sorftime_api_key or "")[:8] + "..."
+            if settings.sorftime_api_key
+            else "(empty)"
+        )
         logger.info(
-            "Listing plugin task %s product_input=%r chat_id=%s dify_url=%s",
+            "Listing plugin task %s product_input=%r input_type=%s chat_id=%s sorftime_api_key=%s",
             task_id,
             product_input[:100],
+            input_type,
             chat_id,
-            settings.listing_dify_api_url,
+            api_key_prefix,
         )
 
-        market_data = _fetch_sorftime_listing_data(product_input)
-        dify_product_input = _build_dify_product_input(product_input, market_data)
-        if market_data:
-            logger.info("Listing plugin task %s using Sorftime market data", task_id)
+        market_data, detected_type, sorftime_method = _fetch_sorftime_listing_data(product_input)
+        dify_product_input = _build_dify_product_input(
+            product_input, market_data, detected_type
+        )
+        logger.info(
+            "Listing plugin task %s sorftime_method=%s sorftime_ok=%s dify_input_len=%s entering Dify",
+            task_id,
+            sorftime_method or "(skipped)",
+            market_data is not None,
+            len(dify_product_input),
+        )
 
         try:
             dify_result = self.dify_client.analyze_product_input(dify_product_input)
         except Exception as exc:
-            logger.warning("Listing Dify call failed, using mock: %s", exc, exc_info=True)
+            logger.error(
+                "Listing Dify call failed task=%s: %s", task_id, exc, exc_info=True
+            )
+            if market_data:
+                return {
+                    "product_input": product_input,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_fallback_report(
+                        product_input, market_data, detected_type
+                    ),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                    "dify_error": str(exc),
+                }
             result = _mock_result(product_input, reason=str(exc))
             result["dify_error"] = str(exc)
             return result
 
         analysis = dify_result.get("analysis") or {}
-        report = (dify_result.get("report") or "").strip()
+        report = _clean_dify_report((dify_result.get("report") or "").strip())
+        logger.info(
+            "Listing plugin task %s Dify result analysis_keys=%s report_len=%s",
+            task_id,
+            list(analysis.keys()),
+            len(report),
+        )
 
         if _is_json_blob(report):
             _, report = _split_json_and_report(report)
+            report = _clean_dify_report(report)
 
         if not report:
             raw = dify_result.get("_raw") or {}
@@ -342,23 +486,51 @@ class ListingOptimizerPlugin(Plugin):
                     chunk_analysis, chunk_report = _extract_text_from_string_value(value)
                     _merge_parsed_json(analysis, chunk_analysis)
                     if chunk_report:
-                        report = chunk_report
+                        report = _clean_dify_report(chunk_report)
                         break
 
         if not report:
             logger.warning(
-                "Listing Dify returned no usable text report, analysis_keys=%s",
+                "Listing plugin task %s Dify empty report, fallback (analysis_keys=%s)",
+                task_id,
                 list(analysis.keys()),
             )
+            if market_data:
+                return {
+                    "product_input": product_input,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_fallback_report(
+                        product_input, market_data, detected_type
+                    ),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                }
             result = _mock_result(product_input, reason="Dify 响应中未解析出纯文本报告")
             result["mode"] = "mock_fallback"
             return result
 
+        if not analysis and report:
+            logger.info(
+                "Listing plugin task %s using Dify text report without structured analysis",
+                task_id,
+            )
+            return {
+                "product_input": product_input,
+                "chat_id": chat_id,
+                "analysis": {},
+                "report": report,
+                "mode": dify_result.get("mode", "dify"),
+                "task_id": task_id,
+            }
+
         if _has_listing_schema(analysis):
-            logger.info("Listing task %s: using Dify text report (listing schema present)", task_id)
+            logger.info(
+                "Listing task %s: using Dify report (listing schema present)", task_id
+            )
         else:
             logger.info(
-                "Listing task %s: using Dify text report (generic schema, keys=%s)",
+                "Listing task %s: using Dify report (generic schema, keys=%s)",
                 task_id,
                 list(analysis.keys())[:8],
             )
