@@ -248,13 +248,26 @@ def _clean_dify_report(text: str) -> str:
     return cleaned.strip()
 
 
-def _is_valid_sorftime_data(data: dict[str, Any] | None) -> bool:
+def _is_valid_sorftime_data(data: dict[str, Any] | None, input_type: str = "keyword") -> bool:
     if not data:
         return False
-    if data.get("raw_text") in ("没有相关数据", "无数据", ""):
+    if data.get("error") == "sorftime_no_data":
         return False
+    raw = data.get("raw_text", "")
+    if raw in ("没有相关数据", "无数据", ""):
+        return False
+    if isinstance(raw, str) and (
+        "请指定查询的站点" in raw or "没有相关数据" in raw
+    ):
+        return False
+    if input_type == "asin":
+        return bool(
+            data.get("title")
+            or data.get("asin")
+            or (isinstance(raw, str) and "标题" in raw and len(raw) > 80)
+        )
     if len(data) == 1 and "raw_text" in data:
-        return False
+        return isinstance(raw, str) and len(raw) > 50 and "关键词" in raw
     return True
 
 
@@ -268,7 +281,7 @@ def _build_dify_product_input(
     data_json = json.dumps(market_data, ensure_ascii=False, indent=2)
     if len(data_json) > 8000:
         data_json = data_json[:8000] + "…"
-    data_label = "ASIN 竞品 Listing 数据" if input_type == "asin" else "品类关键词市场数据"
+    data_label = "ASIN 商品详情（product_detail）" if input_type == "asin" else "品类关键词市场数据"
     return (
         f"用户要求优化以下产品：{user_input}\n\n"
         f"【真实市场数据（来自 Sorftime · {data_label}）】\n"
@@ -296,16 +309,16 @@ def _fetch_sorftime_listing_data(
     collector = SorftimeCollector()
     if input_type == "asin":
         asin = user_input.strip().upper()
-        method = "listing_analysis"
+        method = "product_detail"
         logger.info(
-            "Listing input detected as ASIN=%s, calling Sorftime listing_analysis site=com api_key_prefix=%s",
+            "Listing input detected as ASIN=%s, calling Sorftime product_detail site=com api_key_prefix=%s",
             asin,
             api_key[:8] + "...",
         )
         try:
-            data = collector.listing_analysis(asin, site="com")
+            data = collector.product_detail(asin, site="com")
         except Exception as exc:
-            logger.warning("Sorftime listing_analysis failed for %r: %s", asin, exc)
+            logger.warning("Sorftime product_detail failed for %r: %s", asin, exc)
             return None, input_type, method
     else:
         method = "product_research"
@@ -320,7 +333,7 @@ def _fetch_sorftime_listing_data(
             logger.warning("Sorftime product_research failed for %r: %s", user_input, exc)
             return None, input_type, method
 
-    if not _is_valid_sorftime_data(data):
+    if not _is_valid_sorftime_data(data, input_type=input_type):
         preview = json.dumps(data, ensure_ascii=False)[:200] if data else "None"
         logger.warning(
             "Sorftime %s returned no usable data for %r: %s",

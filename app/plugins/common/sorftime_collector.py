@@ -32,7 +32,6 @@ _SITE_TO_AMZ: dict[str, str] = {
 # Sorftime MCP 官方工具名映射（业务方法 -> MCP tool）
 _TOOL_ALIASES: dict[str, str] = {
     "product_research": "keyword_detail",
-    "listing_analysis": "product_detail",
     "keyword_research": "product_traffic_terms",
 }
 
@@ -92,7 +91,7 @@ class SorftimeCollector:
                 "keywordSupportSite": amz_site,
                 "amzSite": amz_site,
             }
-        if tool_name == "listing_analysis":
+        if tool_name == "product_detail":
             asin = args.pop("asin", "")
             site = args.pop("site", "com")
             return {"asin": asin, "amzSite": self._site_to_amz(str(site))}
@@ -242,7 +241,12 @@ class SorftimeCollector:
             logger.warning("Sorftime MCP empty result tool=%s mcp_tool=%s", tool_name, mcp_tool)
             return None
 
-        normalized = self._normalize_product_research(data) if tool_name == "product_research" else data
+        if tool_name == "product_research":
+            normalized = self._normalize_product_research(data)
+        elif tool_name == "product_detail":
+            normalized = self._normalize_product_detail(data)
+        else:
+            normalized = data
         self._set_cached(cache_key, normalized)
         logger.info(
             "Sorftime MCP success tool=%s mcp_tool=%s keys=%s",
@@ -274,17 +278,72 @@ class SorftimeCollector:
                     break
         return normalized
 
+    @staticmethod
+    def _normalize_product_detail(data: dict[str, Any]) -> dict[str, Any]:
+        """解析 product_detail 响应，提取 title/price/brand/rating 等标准字段。"""
+        raw = data.get("raw_text", "")
+        if raw in ("没有相关数据", "无数据", "", "请指定查询的站点，请阅读方法签名中amzSite参数说明。"):
+            return data
+        if isinstance(raw, str) and ("请指定查询的站点" in raw or "没有相关数据" in raw):
+            return {"raw_text": raw, "error": "sorftime_no_data"}
+
+        normalized = dict(data)
+        if not isinstance(raw, str) or not raw.strip():
+            return normalized
+
+        line_fields = {
+            "asin": ("产品ASIN码", "ASIN", "asin"),
+            "title": ("标题", "title"),
+            "price": ("价格", "price"),
+            "brand": ("品牌", "brand"),
+            "rating": ("星级", "rating"),
+            "reviews_count": ("评论数", "reviews_count"),
+            "category": ("分类", "category"),
+            "monthly_sales": ("月销量",),
+        }
+        for line in raw.replace("\r\n", "\n").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if "：" in line:
+                key, val = line.split("：", 1)
+            elif ":" in line:
+                key, val = line.split(":", 1)
+            else:
+                continue
+            key, val = key.strip(), val.strip()
+            for norm_key, aliases in line_fields.items():
+                if key in aliases and val and norm_key not in normalized:
+                    normalized[norm_key] = val
+                    break
+
+        if normalized.get("rating"):
+            try:
+                normalized["rating"] = float(str(normalized["rating"]))
+            except (TypeError, ValueError):
+                pass
+        if normalized.get("reviews_count"):
+            try:
+                normalized["reviews_count"] = int(
+                    re.sub(r"[^\d]", "", str(normalized["reviews_count"]))
+                )
+            except (TypeError, ValueError):
+                pass
+
+        return normalized
+
     def product_research(self, keyword: str, site: str = "com") -> Optional[dict[str, Any]]:
         keyword = (keyword or "").strip()
         if not keyword:
             return None
         return self._call_mcp("product_research", {"keyword": keyword, "site": site})
 
-    def listing_analysis(self, asin: str, site: str = "com") -> Optional[dict[str, Any]]:
+    def product_detail(self, asin: str, site: str = "com") -> Optional[dict[str, Any]]:
+        """查询单个 ASIN 商品详情（Sorftime MCP 工具 product_detail）。"""
         asin = (asin or "").strip().upper()
         if not asin:
             return None
-        return self._call_mcp("listing_analysis", {"asin": asin, "site": site})
+        return self._call_mcp("product_detail", {"asin": asin, "site": site})
 
     def keyword_research(self, asin: str, site: str = "com") -> Optional[dict[str, Any]]:
         asin = (asin or "").strip().upper()
