@@ -34,6 +34,10 @@ class Settings:
     only_unread: bool = os.getenv("ONLY_UNREAD", "true").lower() == "true"
     send_feishu: bool = os.getenv("SEND_FEISHU", "true").lower() == "true"
     alert_frequency_limit_minutes: int = int(os.getenv("ALERT_FREQUENCY_LIMIT_MINUTES", "10"))
+    sorftime_mcp_url: str = os.getenv("SORFTIME_MCP_URL", "https://mcp.sorftime.com")
+    sorftime_api_key: str = os.getenv("SORFTIME_API_KEY", "")
+    sorftime_enable_cache: bool = os.getenv("SORFTIME_ENABLE_CACHE", "true").lower() == "true"
+    sorftime_cache_ttl: int = int(os.getenv("SORFTIME_CACHE_TTL", "3600"))
 
 
 settings = Settings()

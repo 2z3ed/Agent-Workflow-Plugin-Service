@@ -7,6 +7,7 @@ import requests
 
 from app.config import settings
 from app.plugins.base import Plugin
+from app.plugins.common.sorftime_collector import SorftimeCollector, looks_like_asin
 from app.plugins.email.dify_client import DifyClient
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,32 @@ def _format_report_from_analysis(analysis: dict[str, Any], product_input: str) -
     return "\n".join(lines).strip()
 
 
+def _build_dify_product_input(product_input: str, market_data: dict[str, Any] | None) -> str:
+    if not market_data:
+        return product_input
+    data_json = json.dumps(market_data, ensure_ascii=False)
+    if len(data_json) > 8000:
+        data_json = data_json[:8000] + "…"
+    return (
+        f"用户输入：{product_input}\n\n"
+        f"以下为 Sorftime 真实竞品/Listing 数据（JSON），请结合数据生成 Listing 优化报告：\n"
+        f"{data_json}"
+    )
+
+
+def _fetch_sorftime_listing_data(product_input: str) -> dict[str, Any] | None:
+    if not settings.sorftime_api_key:
+        return None
+    collector = SorftimeCollector()
+    try:
+        if looks_like_asin(product_input):
+            return collector.listing_analysis(product_input.strip().upper(), site="com")
+        return collector.product_research(product_input, site="com")
+    except Exception as exc:
+        logger.warning("Sorftime listing data fetch failed for %r: %s", product_input, exc)
+        return None
+
+
 def _mock_result(product_input: str, reason: str = "") -> dict[str, Any]:
     report = (
         f"【Listing 优化·模拟】\n"
@@ -287,8 +314,13 @@ class ListingOptimizerPlugin(Plugin):
             settings.listing_dify_api_url,
         )
 
+        market_data = _fetch_sorftime_listing_data(product_input)
+        dify_product_input = _build_dify_product_input(product_input, market_data)
+        if market_data:
+            logger.info("Listing plugin task %s using Sorftime market data", task_id)
+
         try:
-            dify_result = self.dify_client.analyze_product_input(product_input)
+            dify_result = self.dify_client.analyze_product_input(dify_product_input)
         except Exception as exc:
             logger.warning("Listing Dify call failed, using mock: %s", exc, exc_info=True)
             result = _mock_result(product_input, reason=str(exc))

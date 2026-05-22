@@ -7,6 +7,7 @@ import requests
 
 from app.config import settings
 from app.plugins.base import Plugin
+from app.plugins.common.sorftime_collector import SorftimeCollector
 from app.plugins.email.dify_client import DifyClient
 
 logger = logging.getLogger(__name__)
@@ -15,14 +16,21 @@ PRODUCT_FIELDS = ("score", "summary", "suggestion")
 
 
 class ProductDifyClient(DifyClient):
-    """Dify client for product_analyzer workflow (input: keyword)."""
+    """Dify client for product_analyzer workflow (input: product_input)."""
 
     def analyze_keyword(self, keyword: str) -> dict[str, Any]:
+        # 工作流 Start 节点变量名为 product_input（非 keyword）
+        product_input = keyword[:9900] if len(keyword) > 9900 else keyword
         payload = {
-            "inputs": {"keyword": keyword},
+            "inputs": {"product_input": product_input},
             "response_mode": "blocking",
             "user": "agent-workflow-plugin-service",
         }
+        logger.info(
+            "Calling Dify product workflow url=%s product_input_len=%s",
+            self.api_url,
+            len(product_input),
+        )
         response = requests.post(
             self.api_url,
             headers={
@@ -43,10 +51,18 @@ class ProductDifyClient(DifyClient):
             return {"mode": "dify", "_raw": raw}
 
         analysis, report = _parse_product_outputs(outputs)
+        report = _clean_dify_report(report)
+        logger.info(
+            "Dify product workflow done output_keys=%s analysis_keys=%s report_len=%s",
+            list(outputs.keys()),
+            list(analysis.keys()),
+            len(report),
+        )
         return {
             "mode": "dify",
             "analysis": analysis,
             "report": report,
+            "_raw": raw,
         }
 
 
@@ -98,6 +114,49 @@ def _parse_product_outputs(outputs: dict[str, Any]) -> tuple[dict[str, Any], str
     return analysis, report
 
 
+def _clean_dify_report(text: str) -> str:
+    """移除 Dify LLM 思考块，保留可发飞书的正文。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    parts = re.split(r"</think>", cleaned, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) > 1:
+        cleaned = parts[1]
+    return cleaned.strip()
+
+
+def _is_valid_sorftime_data(data: dict[str, Any] | None) -> bool:
+    if not data:
+        return False
+    if data.get("raw_text") in ("没有相关数据", "无数据", ""):
+        return False
+    if len(data) == 1 and "raw_text" in data:
+        return False
+    return True
+
+
+def _sorftime_summary_report(keyword: str, market_data: dict[str, Any]) -> str:
+    """Sorftime 有数据但 Dify 失败时，用真实数据生成临时报告。"""
+    lines = [f"【选品分析·{keyword}】（基于 Sorftime 真实市场数据）"]
+    field_labels = (
+        ("关键词", "关键词"),
+        ("周搜索量", "周搜索量"),
+        ("月搜索量", "月搜索量"),
+        ("周搜索排名", "周搜索排名"),
+        ("推荐cpc竞价", "推荐 CPC 竞价"),
+        ("搜索结果竞品数量", "搜索结果竞品数"),
+        ("词搜索量旺季", "搜索量旺季"),
+    )
+    for key, label in field_labels:
+        value = market_data.get(key)
+        if value:
+            lines.append(f"- {label}：{value}")
+    if len(lines) == 1:
+        preview = json.dumps(market_data, ensure_ascii=False)[:1500]
+        lines.append(preview)
+    return "\n".join(lines)
+
+
 def _split_json_and_report(text: str) -> tuple[dict[str, Any] | None, str]:
     cleaned = text.strip()
     if not cleaned.startswith("{"):
@@ -121,6 +180,51 @@ def _split_json_and_report(text: str) -> tuple[dict[str, Any] | None, str]:
     rest = cleaned[idx:].strip()
     rest = re.sub(r"^[\s\n]+", "", rest)
     return obj, rest
+
+
+def _build_dify_keyword_input(keyword: str, market_data: dict[str, Any] | None) -> str:
+    if not market_data:
+        return keyword
+    data_json = json.dumps(market_data, ensure_ascii=False)
+    if len(data_json) > 8000:
+        data_json = data_json[:8000] + "…"
+    return (
+        f"选品关键词：{keyword}\n\n"
+        f"以下为 Sorftime 真实市场数据（JSON），请结合数据生成选品分析报告：\n"
+        f"{data_json}"
+    )
+
+
+def _fetch_sorftime_market_data(keyword: str) -> dict[str, Any] | None:
+    api_key = settings.sorftime_api_key or ""
+    if not api_key:
+        logger.info("Sorftime API key not configured, skip product_research")
+        return None
+    logger.info(
+        "Calling Sorftime product_research for keyword=%r site=com api_key_prefix=%s",
+        keyword,
+        api_key[:8] + "...",
+    )
+    try:
+        data = SorftimeCollector().product_research(keyword, site="com")
+    except Exception as exc:
+        logger.warning("Sorftime product_research failed for %r: %s", keyword, exc)
+        return None
+    if not _is_valid_sorftime_data(data):
+        preview = json.dumps(data, ensure_ascii=False)[:200] if data else "None"
+        logger.warning(
+            "Sorftime product_research returned no usable data for %r: %s",
+            keyword,
+            preview,
+        )
+        return None
+    logger.info(
+        "Sorftime product_research success for %r keys=%s preview=%s",
+        keyword,
+        list(data.keys())[:8],
+        json.dumps(data, ensure_ascii=False)[:200],
+    )
+    return data
 
 
 def _mock_result(keyword: str) -> dict[str, Any]:
@@ -181,22 +285,76 @@ class ProductPlugin(Plugin):
             raise ValueError("keyword is required")
 
         chat_id = params.get("chat_id")
-        logger.info("Product plugin task %s keyword=%r chat_id=%s", task_id, keyword, chat_id)
+        api_key_prefix = (settings.sorftime_api_key or "")[:8] + "..." if settings.sorftime_api_key else "(empty)"
+        logger.info(
+            "Product plugin task %s keyword=%r chat_id=%s sorftime_api_key=%s",
+            task_id,
+            keyword,
+            chat_id,
+            api_key_prefix,
+        )
+
+        market_data = _fetch_sorftime_market_data(keyword)
+        dify_input = _build_dify_keyword_input(keyword, market_data)
+        logger.info(
+            "Product plugin task %s sorftime_ok=%s dify_input_len=%s entering Dify",
+            task_id,
+            market_data is not None,
+            len(dify_input),
+        )
 
         try:
-            dify_result = self.dify_client.analyze_keyword(keyword)
+            dify_result = self.dify_client.analyze_keyword(dify_input)
         except Exception as exc:
-            logger.warning("Product Dify call failed, using mock: %s", exc)
+            logger.error("Product Dify call failed task=%s: %s", task_id, exc, exc_info=True)
+            if market_data:
+                return {
+                    "keyword": keyword,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_summary_report(keyword, market_data),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                    "dify_error": str(exc),
+                }
             result = _mock_result(keyword)
             result["dify_error"] = str(exc)
             return result
 
         if dify_result.get("_use_mock") or dify_result.get("mode") == "mock":
+            logger.warning("Product plugin task %s Dify returned mock mode", task_id)
+            if market_data:
+                return {
+                    "keyword": keyword,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_summary_report(keyword, market_data),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                }
             return _mock_result(keyword)
 
         analysis = dify_result.get("analysis") or {}
-        report = (dify_result.get("report") or "").strip()
+        report = _clean_dify_report((dify_result.get("report") or "").strip())
+        logger.info(
+            "Product plugin task %s Dify result analysis_keys=%s report_len=%s",
+            task_id,
+            list(analysis.keys()),
+            len(report),
+        )
+
         if not report:
+            logger.warning("Product plugin task %s Dify empty report, fallback", task_id)
+            if market_data:
+                return {
+                    "keyword": keyword,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_summary_report(keyword, market_data),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                    "dify_raw": dify_result.get("_raw"),
+                }
             result = _mock_result(keyword)
             result["mode"] = "mock_fallback"
             result["dify_raw"] = dify_result.get("_raw")
@@ -207,9 +365,33 @@ class ProductPlugin(Plugin):
             if parsed_json:
                 analysis = {k: parsed_json[k] for k in PRODUCT_FIELDS if k in parsed_json}
                 if parsed_report:
-                    report = parsed_report
+                    report = _clean_dify_report(parsed_report)
+
+        if not analysis and report:
+            logger.info(
+                "Product plugin task %s using Dify text report without structured analysis",
+                task_id,
+            )
+            return {
+                "keyword": keyword,
+                "chat_id": chat_id,
+                "analysis": {},
+                "report": report,
+                "mode": dify_result.get("mode", "dify"),
+                "task_id": task_id,
+            }
 
         if not analysis:
+            logger.warning("Product plugin task %s no analysis and no report text", task_id)
+            if market_data:
+                return {
+                    "keyword": keyword,
+                    "chat_id": chat_id,
+                    "analysis": {},
+                    "report": _sorftime_summary_report(keyword, market_data),
+                    "mode": "sorftime_fallback",
+                    "task_id": task_id,
+                }
             result = _mock_result(keyword)
             result["mode"] = "mock_fallback"
             return result
